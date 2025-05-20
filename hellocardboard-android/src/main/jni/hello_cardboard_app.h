@@ -89,7 +89,11 @@ class HelloCardboardApp {
    */
   void SwitchViewer();
 
- private:
+  void InitImage();
+
+  void OnVideoFrame(uint8_t* data, int width, int height);
+
+private:
   /**
    * Default near clip plane z-axis coordinate.
    */
@@ -125,33 +129,11 @@ class HelloCardboardApp {
   Matrix4x4 GetPose();
 
   /**
-   * Draws all world-space objects for the given eye.
-   */
-  void DrawWorld();
-
-  /**
    * Draws the target object.
    */
   void DrawTarget();
 
-  /**
-   * Draws the room.
-   */
-  void DrawRoom();
-
-  /**
-   * Finds a new random position for the target object.
-   */
-  void HideTarget();
-
-  /**
-   * Checks if user is pointing or looking at the target object by calculating
-   * whether the angle between the user's gaze and the vector pointing towards
-   * the object is lower than some threshold.
-   *
-   * @return true if the user is pointing at the target object.
-   */
-  bool IsPointingAtTarget();
+  void DrawQuad();
 
   jobject java_asset_mgr_;
   AAssetManager* asset_mgr_;
@@ -184,15 +166,12 @@ class HelloCardboardApp {
   Matrix4x4 model_target_;
 
   Matrix4x4 modelview_projection_target_;
-  Matrix4x4 modelview_projection_room_;
 
-  TexturedMesh room_;
-  Texture room_tex_;
+  TexturedMesh object_mesh_;
+  Texture object_texture_;
 
-  std::vector<TexturedMesh> target_object_meshes_;
-  std::vector<Texture> target_object_not_selected_textures_;
-  std::vector<Texture> target_object_selected_textures_;
-  int cur_target_object_;
+  GLuint quad_texture_;
+  GLuint quad_vbo_;
 };
 
 }  // namespace ndk_hello_cardboard

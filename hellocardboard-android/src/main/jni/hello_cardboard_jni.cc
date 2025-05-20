@@ -91,4 +91,16 @@ JNI_METHOD(void, nativeSwitchViewer)
   native(native_app)->SwitchViewer();
 }
 
+JNI_METHOD(void, nativeProcessFrame)
+(JNIEnv* env, jobject /*obj*/, jlong native_app, jobject rgba_buffer, jint width, jint height) {
+  uint8_t* data = reinterpret_cast<uint8_t*>(env->GetDirectBufferAddress(rgba_buffer));
+  if (!data) {
+    __android_log_print(ANDROID_LOG_ERROR, "native", "Failed to get direct buffer address");
+    return;
+  }
+
+  // Call your native app's method to handle the frame
+  native(native_app)->OnVideoFrame(data, width, height);
+}
+
 }  // extern "C"

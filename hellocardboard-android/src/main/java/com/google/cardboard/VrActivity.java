@@ -17,14 +17,19 @@ package com.google.cardboard;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
+import android.graphics.Bitmap;
+import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.opengl.GLSurfaceView;
+import android.os.Build;
 import android.os.Build.VERSION;
 import android.os.Build.VERSION_CODES;
 import android.os.Bundle;
+import android.os.Environment;
 import android.provider.Settings;
 import androidx.appcompat.app.AppCompatActivity;
 import android.util.Log;
@@ -35,6 +40,12 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.PopupMenu;
 import android.widget.Toast;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import javax.microedition.khronos.egl.EGLConfig;
@@ -64,12 +75,28 @@ public class VrActivity extends AppCompatActivity implements PopupMenu.OnMenuIte
 
   private GLSurfaceView glView;
 
+  // Video
+  private long currentTimeUs = 0;
+  private long videoDurationUs = -1;
+  private static final long FRAME_STEP_US = 33_000; // ~30 FPS in microseconds
+  private MediaMetadataRetriever retriever;
+
   @SuppressLint("ClickableViewAccessibility")
   @Override
   public void onCreate(Bundle savedInstance) {
     super.onCreate(savedInstance);
 
     nativeApp = nativeOnCreate(getAssets());
+
+    File file = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "test.mp4");
+    Uri videoUri = Uri.fromFile(file);
+
+    retriever = new MediaMetadataRetriever();
+    retriever.setDataSource(this, videoUri);
+
+    String durationMsStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+    long durationMs = Long.parseLong(durationMsStr);
+    videoDurationUs = durationMs * 1000; // convert ms to us
 
     setContentView(R.layout.activity_vr);
     glView = findViewById(R.id.surface_view);
@@ -121,11 +148,7 @@ public class VrActivity extends AppCompatActivity implements PopupMenu.OnMenuIte
   protected void onResume() {
     super.onResume();
 
-    // On Android P and below, checks for activity to READ_EXTERNAL_STORAGE. When it is not granted,
-    // the application will request them. For Android Q and above, READ_EXTERNAL_STORAGE is optional
-    // and scoped storage will be used instead. If it is provided (but not checked) and there are
-    // device parameters saved in external storage those will be migrated to scoped storage.
-    if (VERSION.SDK_INT < VERSION_CODES.Q && !isReadExternalStorageEnabled()) {
+    if (!isExternalStorageEnabled()) {
       requestPermissions();
       return;
     }
@@ -149,6 +172,32 @@ public class VrActivity extends AppCompatActivity implements PopupMenu.OnMenuIte
     }
   }
 
+  public void extractNextFrame() throws IOException {
+    if (currentTimeUs >= videoDurationUs) {
+      Log.i("VideoFrameExtractor", "Reached end of video");
+      retriever.release();
+      return;
+    }
+
+    Bitmap bitmap = retriever.getFrameAtTime(currentTimeUs, MediaMetadataRetriever.OPTION_CLOSEST);
+
+    if (bitmap == null) {
+      Log.e("VideoFrameExtractor", "Failed to extract frame at " + currentTimeUs);
+      currentTimeUs += FRAME_STEP_US;
+      return;
+    }
+
+    Bitmap rgbaBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+    ByteBuffer buffer = ByteBuffer.allocateDirect(rgbaBitmap.getByteCount());
+    buffer.order(ByteOrder.nativeOrder());
+    rgbaBitmap.copyPixelsToBuffer(buffer);
+    buffer.rewind();
+
+    nativeProcessFrame(nativeApp, buffer, rgbaBitmap.getWidth(), rgbaBitmap.getHeight());
+
+    currentTimeUs += FRAME_STEP_US;
+  }
+
   private class Renderer implements GLSurfaceView.Renderer {
     @Override
     public void onSurfaceCreated(GL10 gl10, EGLConfig eglConfig) {
@@ -162,6 +211,11 @@ public class VrActivity extends AppCompatActivity implements PopupMenu.OnMenuIte
 
     @Override
     public void onDrawFrame(GL10 gl10) {
+      try {
+        extractNextFrame();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
       nativeOnDrawFrame(nativeApp);
     }
   }
@@ -190,41 +244,65 @@ public class VrActivity extends AppCompatActivity implements PopupMenu.OnMenuIte
     return false;
   }
 
-  /**
-   * Checks for READ_EXTERNAL_STORAGE permission.
-   *
-   * @return whether the READ_EXTERNAL_STORAGE is already granted.
-   */
-  private boolean isReadExternalStorageEnabled() {
-    return ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
-        == PackageManager.PERMISSION_GRANTED;
+  private boolean isExternalStorageEnabled() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // Android 13 (API 33)
+      boolean hasPhotoPermission = ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES)
+              == PackageManager.PERMISSION_GRANTED;
+      boolean hasVideoPermission = ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO)
+              == PackageManager.PERMISSION_GRANTED;
+      boolean hasAudioPermission = ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO)
+              == PackageManager.PERMISSION_GRANTED;
+      return hasPhotoPermission && hasVideoPermission && hasAudioPermission;
+    } else {
+      // For Android 12 and below
+      return ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
+              == PackageManager.PERMISSION_GRANTED;
+    }
   }
 
-  /** Handles the requests for activity permission to READ_EXTERNAL_STORAGE. */
   private void requestPermissions() {
-    final String[] permissions = new String[] {Manifest.permission.READ_EXTERNAL_STORAGE};
+    String[] permissions;
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      permissions = new String[] {
+              Manifest.permission.READ_MEDIA_IMAGES,
+              Manifest.permission.READ_MEDIA_VIDEO,
+              Manifest.permission.READ_MEDIA_AUDIO
+      };
+    } else {
+      permissions = new String[] {
+              Manifest.permission.READ_EXTERNAL_STORAGE
+      };
+    }
+
     ActivityCompat.requestPermissions(this, permissions, PERMISSIONS_REQUEST_CODE);
   }
 
-  /**
-   * Callback for the result from requesting permissions.
-   *
-   * <p>When READ_EXTERNAL_STORAGE permission is not granted, the settings view will be launched
-   * with a toast explaining why it is required.
-   */
+
   @Override
   public void onRequestPermissionsResult(
-      int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+          int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
     super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-    if (!isReadExternalStorageEnabled()) {
-      Toast.makeText(this, R.string.read_storage_permission, Toast.LENGTH_LONG).show();
-      if (!ActivityCompat.shouldShowRequestPermissionRationale(
-          this, Manifest.permission.READ_EXTERNAL_STORAGE)) {
-        // Permission denied with checking "Do not ask again". Note that in Android R "Do not ask
-        // again" is not available anymore.
-        launchPermissionsSettings();
+
+    if (requestCode == PERMISSIONS_REQUEST_CODE) {
+      boolean allGranted = true;
+
+      for (int i = 0; i < permissions.length; i++) {
+        if (grantResults[i] != PackageManager.PERMISSION_GRANTED) {
+          allGranted = false;
+
+          // Check if user selected "Don't ask again"
+          if (!ActivityCompat.shouldShowRequestPermissionRationale(this, permissions[i])) {
+            // Permission denied permanently
+            launchPermissionsSettings();
+          }
+        }
       }
-      finish();
+
+      if (!allGranted) {
+        Toast.makeText(this, R.string.read_storage_permission, Toast.LENGTH_LONG).show();
+        finish();
+      }
     }
   }
 
@@ -264,4 +342,6 @@ public class VrActivity extends AppCompatActivity implements PopupMenu.OnMenuIte
   private native void nativeSetScreenParams(long nativeApp, int width, int height);
 
   private native void nativeSwitchViewer(long nativeApp);
+
+  private native void nativeProcessFrame(long nativeApp, ByteBuffer rgbaBuffer, int width, int height);
 }
